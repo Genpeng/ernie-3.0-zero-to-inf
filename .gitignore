@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# OS ignored files
+.DS_Store
+
+# PyCharm ignored files
+.idea/
