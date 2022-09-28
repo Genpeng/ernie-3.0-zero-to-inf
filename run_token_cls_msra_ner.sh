@@ -1,3 +1,7 @@
+#!/usr/bin/env bash
+
+pip install paddlenlp==2.4.0
+
 TASK_NAME="msra_ner"
 TRAIN_FILE_PATH="datasets/msra_ner/train.tsv"
 EVAL_FILE_PATH="datasets/msra_ner/test.tsv"
