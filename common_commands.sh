@@ -1,0 +1,1 @@
+nohup sh run_token_cls_msra_ner.sh > run_token_cls_msra_ner.log 2>&1 &
