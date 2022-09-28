@@ -13,7 +13,7 @@ python run_token_cls.py \
     --model_name_or_path $MODEL_NAME \
     --output_dir $OUTPUT_DIR \
     --do_train \
-    --num_train_epochs 3 \
+    --num_train_epochs 5 \
     --batch_size 128 \
     --learning_rate 5e-5 \
     --logging_steps 10 \

@@ -172,6 +172,45 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+def tokenize_and_align_labels(example, tokenizer, label_map, max_seq_length=128):
+    no_entity_id = label_map["O"]
+    tokens = example["tokens"]  # list of tokens
+    labels = [label_map.get(label, no_entity_id) for label in example["labels"]]  # list of label ids
+
+    tokens_encoded = tokenizer(tokens, return_length=True, is_split_into_words=True, max_seq_len=max_seq_length)
+
+    input_ids_len = len(tokens_encoded["input_ids"])  # input_ids_len = max_seq_len
+    # 如果 input_ids_len - 2 < len(labels)，说明输入的 tokens 的长度超过 max_seq_len，被截断了
+    if input_ids_len - 2 < len(labels):
+        labels = labels[:input_ids_len - 2]
+    tokens_encoded["labels"] = [no_entity_id] + labels + [no_entity_id]
+    tokens_encoded["labels"] += [no_entity_id] * (input_ids_len - len(tokens_encoded["labels"]))
+    return tokens_encoded
+
+
+def tokenize_and_align_labels_v2(examples, tokenizer, label_map, max_seq_length=128):
+    no_entity_id = label_map["O"]
+    examples_encoded = tokenizer(
+        examples['tokens'],
+        max_seq_len=max_seq_length,
+        # We use this argument because the texts in our dataset are lists of words (with a label for each word).
+        is_split_into_words=True,
+        return_length=True
+    )
+
+    batch_labels = []
+    for i, labels in enumerate(examples['labels']):
+        labels = [label_map.get(label, no_entity_id) for label in labels]
+        input_ids_len = len(examples_encoded['input_ids'][i])
+        if input_ids_len - 2 < len(labels):
+            labels = labels[:input_ids_len -2]
+        labels = [no_entity_id] + labels + [no_entity_id]
+        labels += [no_entity_id] * (input_ids_len - len(labels))
+        batch_labels.append(labels)
+
+    examples_encoded["labels"] = batch_labels
+    return examples_encoded
+
 
 @paddle.no_grad()
 def evaluate(data_loader, model, loss_func, metric, mode="valid"):
@@ -225,7 +264,9 @@ def do_train(args):
     if paddle.distributed.get_world_size() > 1:
         model = paddle.DataParallel(model)
 
-    def read(data_path):
+    # region Load training and validation set
+
+    def _read_msra_ner_data(data_path):
         with open(data_path, "r") as fin:
             for line in fin:
                 line = line.rstrip()
@@ -234,47 +275,8 @@ def do_train(args):
                 labels = labels_str.split("\002")
                 yield {"tokens": tokens, "labels": labels}
 
-    train_ds = load_dataset(read, data_path=train_file_path, lazy=False)
-    eval_ds = load_dataset(read, data_path=eval_file_path, lazy=False)
-
-    def tokenize_and_align_labels(example, tokenizer, label_map, max_seq_length=128):
-        no_entity_id = label_map["O"]
-        tokens = example["tokens"]  # list of tokens
-        labels = [label_map.get(label, no_entity_id) for label in example["labels"]]  # list of label ids
-
-        tokens_encoded = tokenizer(tokens, return_length=True, is_split_into_words=True, max_seq_len=max_seq_length)
-
-        input_ids_len = len(tokens_encoded["input_ids"])  # input_ids_len = max_seq_len
-        # 如果 input_ids_len - 2 < len(labels)，说明输入的 tokens 的长度超过 max_seq_len，被截断了
-        if input_ids_len - 2 < len(labels):
-            labels = labels[:input_ids_len - 2]
-        tokens_encoded["labels"] = [no_entity_id] + labels + [no_entity_id]
-        tokens_encoded["labels"] += [no_entity_id] * (input_ids_len - len(tokens_encoded["labels"]))
-
-        return tokens_encoded
-
-    def tokenize_and_align_labels_v2(examples, tokenizer, label_map, max_seq_length=128):
-        no_entity_id = label_map["O"]
-        examples_encoded = tokenizer(
-            examples['tokens'],
-            max_seq_len=max_seq_length,
-            # We use this argument because the texts in our dataset are lists of words (with a label for each word).
-            is_split_into_words=True,
-            return_length=True
-        )
-
-        batch_labels = []
-        for i, labels in enumerate(examples['labels']):
-            labels = [label_map.get(label, no_entity_id) for label in labels]
-            input_ids_len = len(examples_encoded['input_ids'][i])
-            if input_ids_len - 2 < len(labels):
-                labels = labels[:input_ids_len -2]
-            labels = [no_entity_id] + labels + [no_entity_id]
-            labels += [no_entity_id] * (input_ids_len - len(labels))
-            batch_labels.append(labels)
-
-        examples_encoded["labels"] = batch_labels
-        return examples_encoded
+    train_ds = load_dataset(_read_msra_ner_data, data_path=train_file_path, lazy=False)
+    eval_ds = load_dataset(_read_msra_ner_data, data_path=eval_file_path, lazy=False)
 
     transform_func = functools.partial(
         tokenize_and_align_labels,
@@ -306,7 +308,15 @@ def do_train(args):
         return_list=True
     )
 
-    num_training_steps = args.max_steps if args.max_steps > 0 else len(train_data_loader) * args.num_train_epochs
+    # endregion
+
+    # region Define loss, metric and optimizer
+
+    train_steps_per_epoch = len(train_data_loader)
+    eval_steps_per_epoch = len(eval_data_loader)
+    print(f"train_steps_per_epoch: {train_steps_per_epoch}, eval_steps_per_epoch: {eval_steps_per_epoch}")
+
+    num_training_steps = args.max_steps if args.max_steps > 0 else train_steps_per_epoch * args.num_train_epochs
     lr_scheduler = LinearDecayWithWarmup(
         args.learning_rate, num_training_steps, args.warmup_steps
     )
@@ -326,6 +336,8 @@ def do_train(args):
 
     loss_obj = paddle.nn.loss.CrossEntropyLoss()
     metric_obj = ChunkEvaluator(label_list=list(label_map.keys()))
+
+    # endregion
 
     global_step = 0
     best_step = 0
