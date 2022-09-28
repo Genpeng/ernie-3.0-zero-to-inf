@@ -133,3 +133,5 @@ dmypy.json
 
 # PyCharm ignored files
 .idea/
+outputs/
+ernie_ckpt/
