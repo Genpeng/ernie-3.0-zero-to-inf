@@ -14,7 +14,7 @@ python run_token_cls.py \
     --output_dir $OUTPUT_DIR \
     --do_train \
     --num_train_epochs 3 \
-    --batch_size 32 \
+    --batch_size 128 \
     --learning_rate 5e-5 \
     --logging_steps 10 \
     --save_steps 1000 \
