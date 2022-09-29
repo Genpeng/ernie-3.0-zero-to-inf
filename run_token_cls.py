@@ -38,7 +38,7 @@ def parse_args():
         "--task_name",
         default="msra_ner",
         type=str,
-        choices=["msra_ner"],
+        choices=["msra_ner", "xhs_ner_v1"],
         help="The named entity recognition datasets."
     )
     parser.add_argument(
