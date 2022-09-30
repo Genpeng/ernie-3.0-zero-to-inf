@@ -27,8 +27,6 @@ from paddlenlp.metrics import ChunkEvaluator
 from paddlenlp.transformers import AutoModelForTokenClassification, AutoTokenizer
 from paddlenlp.transformers import LinearDecayWithWarmup
 
-parser = argparse.ArgumentParser()
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -172,23 +170,8 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-def tokenize_and_align_labels(example, tokenizer, label_map, max_seq_length=128):
-    no_entity_id = label_map["O"]
-    tokens = example["tokens"]  # list of tokens
-    labels = [label_map.get(label, no_entity_id) for label in example["labels"]]  # list of label ids
 
-    tokens_encoded = tokenizer(tokens, return_length=True, is_split_into_words=True, max_seq_len=max_seq_length)
-
-    input_ids_len = len(tokens_encoded["input_ids"])  # input_ids_len = max_seq_len
-    # 如果 input_ids_len - 2 < len(labels)，说明输入的 tokens 的长度超过 max_seq_len，被截断了
-    if input_ids_len - 2 < len(labels):
-        labels = labels[:input_ids_len - 2]
-    tokens_encoded["labels"] = [no_entity_id] + labels + [no_entity_id]
-    tokens_encoded["labels"] += [no_entity_id] * (input_ids_len - len(tokens_encoded["labels"]))
-    return tokens_encoded
-
-
-def tokenize_and_align_labels_v2(examples, tokenizer, label_map, max_seq_length=128):
+def tokenize_and_align_labels_v1(examples, tokenizer, label_map, max_seq_length=128):
     no_entity_id = label_map["O"]
     examples_encoded = tokenizer(
         examples['tokens'],
@@ -212,29 +195,55 @@ def tokenize_and_align_labels_v2(examples, tokenizer, label_map, max_seq_length=
     return examples_encoded
 
 
+def tokenize_and_align_labels_v2(example, tokenizer, label_map, max_seq_length=128):
+    no_entity_id = label_map["O"]
+    tokens = example["tokens"]  # list of tokens
+    labels = [label_map.get(label, no_entity_id) for label in example["labels"]]  # list of label ids
+
+    tokens_encoded = tokenizer(tokens, return_length=True, is_split_into_words=True, max_seq_len=max_seq_length)
+
+    input_ids_len = len(tokens_encoded["input_ids"])  # input_ids_len = max_seq_len
+    # 如果 input_ids_len - 2 < len(labels)，说明输入的 tokens 的长度超过 max_seq_len，被截断了
+    if input_ids_len - 2 < len(labels):
+        labels = labels[:input_ids_len - 2]
+    tokens_encoded["labels"] = [no_entity_id] + labels + [no_entity_id]
+    tokens_encoded["labels"] += [no_entity_id] * (input_ids_len - len(tokens_encoded["labels"]))
+    return tokens_encoded
+
+
 @paddle.no_grad()
-def evaluate(data_loader, model, loss_func, metric, mode="valid"):
+def evaluate(data_loader, model, loss_op, metric_op):
     model.eval()
-    metric.reset()
+    metric_op.reset()
 
     avg_loss, precision, recall, f1_score = 0, 0, 0, 0
     for batch in data_loader:
         logits = model(batch['input_ids'], batch['token_type_ids'])
-        loss = loss_func(logits, batch['labels'])
+        loss = loss_op(logits, batch['labels'])  # (batch_size, )
         avg_loss = paddle.mean(loss)
-        preds = logits.argmax(axis=2)
-        num_infer_chunks, num_label_chunks, num_correct_chunks = metric.compute(
+        preds = logits.argmax(axis=2)  # (batch_size, seq_len)
+        num_infer_chunks, num_label_chunks, num_correct_chunks = metric_op.compute(
             batch['seq_len'], preds, batch['labels']
         )
-        metric.update(num_infer_chunks.numpy(), num_label_chunks.numpy(), num_correct_chunks.numpy())
-        precision, recall, f1_score = metric.accumulate()
+        metric_op.update(
+            num_infer_chunks.numpy(), num_label_chunks.numpy(), num_correct_chunks.numpy()
+        )
+        precision, recall, f1_score = metric_op.accumulate()
     print(
-        "%s - loss: %.6f, precision: %.6f, recall: %.6f, f1: %.6f"
-        % (mode, avg_loss, precision, recall, f1_score)
+        "[EVAL] loss: %.6f, precision: %.6f, recall: %.6f, f1: %.6f"
+        % (avg_loss, precision, recall, f1_score)
     )
 
     model.train()
     return avg_loss, precision, recall, f1_score
+
+
+def print_arguments(args):
+    """print arguments"""
+    print('=============== Configuration Arguments ===============')
+    for arg, value in sorted(vars(args).items(), key=lambda x: x[0]):
+        print('%s: %s' % (arg, value))
+    print('=======================================================')
 
 
 def do_train(args):
@@ -252,21 +261,13 @@ def do_train(args):
     if not os.path.exists(label_map_file_path) or not os.path.isfile(label_map_file_path):
         sys.exit(f"{label_map_file_path} dose not exists or is not a file.")
 
-    with open(label_map_file_path, "r") as fin:
-        label_map = json.load(fin)
-    num_classes = len(label_map)
-
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    model = AutoModelForTokenClassification.from_pretrained(
-        args.model_name_or_path, num_classes=num_classes
-    )
-
-    if paddle.distributed.get_world_size() > 1:
-        model = paddle.DataParallel(model)
+    output_dir = args.output_dir
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
     # region Load training and validation set
 
-    def _read_msra_ner_data(data_path):
+    def _read_token_cls_data(data_path):
         with open(data_path, "r") as fin:
             for line in fin:
                 line = line.rstrip()
@@ -275,46 +276,59 @@ def do_train(args):
                 labels = labels_str.split("\002")
                 yield {"tokens": tokens, "labels": labels}
 
-    train_ds = load_dataset(_read_msra_ner_data, data_path=train_file_path, lazy=False)
-    eval_ds = load_dataset(_read_msra_ner_data, data_path=eval_file_path, lazy=False)
+    train_dataset = load_dataset(_read_token_cls_data, data_path=train_file_path, lazy=False)
+    eval_dataset = load_dataset(_read_token_cls_data, data_path=eval_file_path, lazy=False)
+
+    with open(label_map_file_path, "r") as fin:
+        label_map = json.load(fin)
+    num_classes = len(label_map)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
 
     transform_func = functools.partial(
-        tokenize_and_align_labels,
+        tokenize_and_align_labels_v2,
         tokenizer=tokenizer,
         label_map=label_map,
         max_seq_length=args.max_seq_length
     )
+    train_dataset = train_dataset.map(transform_func)
+    eval_dataset = eval_dataset.map(transform_func)
+
     collate_fn = DataCollatorForTokenClassification(tokenizer=tokenizer)
 
-    train_ds = train_ds.map(transform_func)
     train_batch_sampler = paddle.io.DistributedBatchSampler(
-        train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True
+        train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True
     )
     train_data_loader = DataLoader(
-        dataset=train_ds,
+        dataset=train_dataset,
         batch_sampler=train_batch_sampler,
         collate_fn=collate_fn,
         return_list=True
     )
 
-    eval_ds = eval_ds.map(transform_func)
     eval_batch_sampler = paddle.io.BatchSampler(
-        eval_ds, batch_size=args.batch_size, shuffle=False, drop_last=False
+        eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False
     )
     eval_data_loader = DataLoader(
-        dataset=eval_ds,
+        dataset=eval_dataset,
         batch_sampler=eval_batch_sampler,
         collate_fn=collate_fn,
         return_list=True
     )
 
-    # endregion
-
-    # region Define loss, metric and optimizer
-
     train_steps_per_epoch = len(train_data_loader)
     eval_steps_per_epoch = len(eval_data_loader)
     print(f"train_steps_per_epoch: {train_steps_per_epoch}, eval_steps_per_epoch: {eval_steps_per_epoch}")
+
+    # endregion
+
+    # region Define model, loss, metric and optimizer
+
+    model = AutoModelForTokenClassification.from_pretrained(
+        args.model_name_or_path, num_classes=num_classes
+    )
+    if paddle.distributed.get_world_size() > 1:
+        model = paddle.DataParallel(model)
 
     num_training_steps = args.max_steps if args.max_steps > 0 else train_steps_per_epoch * args.num_train_epochs
     lr_scheduler = LinearDecayWithWarmup(
@@ -323,8 +337,8 @@ def do_train(args):
     # Generate parameter names needed to perform weight decay.
     # All bias and LayerNorm parameters are excluded.
     decay_params = [
-        p.name for n, p in model.named_parameters()
-        if not any(nd in n for nd in ["bias", "norm"])
+        param.name for name, param in model.named_parameters()
+        if not any(_name in name for _name in ["bias", "norm"])
     ]
     optimizer = paddle.optimizer.AdamW(
         learning_rate=lr_scheduler,
@@ -339,21 +353,23 @@ def do_train(args):
 
     # endregion
 
+    # region Training & Validation
+
     global_step = 0
     best_step = 0
-    best_f1 = 0.0
+    best_f1_loss, best_f1_precision, best_f1_recall, best_f1 = 0.0, 0.0, 0.0, 0.0
     tic_train = time.time()
     for epoch in range(1, args.num_train_epochs + 1):
         for step, batch in enumerate(train_data_loader, start=1):
-            logits = model(batch['input_ids'], batch['token_type_ids'])
-            loss = loss_obj(logits, batch['labels'])
-            avg_loss = paddle.mean(loss)
-
             global_step += 1
+
+            logits = model(batch['input_ids'], batch['token_type_ids'])
+            loss = loss_obj(logits, batch['labels'])  # (batch_size, )
+            avg_loss = paddle.mean(loss)
 
             if global_step % args.logging_steps == 0:
                 print(
-                    "global step %d, epoch: %d, batch: %d, loss: %f, speed: %.2f step/s"
+                    "[TRAIN] global step %d, epoch: %d, batch: %d, loss: %f, speed: %.2f step/s"
                     % (global_step, epoch, step, avg_loss, args.logging_steps / (time.time() - tic_train))
                 )
                 tic_train = time.time()
@@ -365,39 +381,31 @@ def do_train(args):
 
             if global_step % args.save_steps == 0 or global_step == num_training_steps:
                 if paddle.distributed.get_rank() == 0:
-                    _, _, _, f1 = evaluate(eval_data_loader, model, loss_obj, metric_obj, "eval")
-                    if f1 > best_f1:
+                    _loss, _precision, _recall, _f1 = evaluate(eval_data_loader, model, loss_obj, metric_obj)
+                    if _f1 > best_f1:
                         best_step = global_step
-                        best_f1 = f1
-                        output_dir = args.output_dir
-                        if not os.path.exists(output_dir):
-                            os.makedirs(output_dir)
+                        best_f1_loss, best_f1_precision, best_f1_recall, best_f1 = (
+                            _loss, _precision, _recall, _f1
+                        )
                         # Need better way to get inner model of DataParallel
                         model_to_save = model._layers if isinstance(model, paddle.DataParallel) else model
                         model_to_save.save_pretrained(output_dir)
                         tokenizer.save_pretrained(output_dir)
 
             if global_step >= num_training_steps:
-                print(f"best_step: {best_step}, best_f1: {best_f1}")
+                print(
+                    "best_step: %d, loss: %.6f, precision: %.4f, recall: %.4f, best_f1: %.4f"
+                    % (best_step, best_f1_loss, best_f1_precision, best_f1_recall, best_f1)
+                )
                 return
-    print(f"best_step: {best_step}, best_f1: {best_f1}")
 
+    # 设置的 max_step 过大（大于 num_train_epochs * train_steps_per_epoch）
+    print(
+        "best_step: %d, loss: %.6f, precision: %.4f, recall: %.4f, best_f1: %.4f"
+        % (best_step, best_f1_loss, best_f1_precision, best_f1_recall, best_f1)
+    )
 
-def print_arguments(args):
-    """
-    print arguments
-
-    Args:
-        args: argparse.Namespace, all configuration arguments
-
-    Returns:
-        None
-    """
-    """print arguments"""
-    print('=============== Configuration Arguments ===============')
-    for arg, value in sorted(vars(args).items(), key=lambda x: x[0]):
-        print('%s: %s' % (arg, value))
-    print('=======================================================')
+    # endregion
 
 
 if __name__ == "__main__":
