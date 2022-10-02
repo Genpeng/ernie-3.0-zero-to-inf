@@ -247,6 +247,11 @@ def print_arguments(args):
 
 
 def do_train(args):
+    start_time = time.time()
+    task_name = args.task_name
+
+    print(f"start execute task '{task_name}'...")
+
     paddle.set_device(args.device)
     if paddle.distributed.get_world_size() > 1:
         paddle.distributed.init_parallel_env()
@@ -393,17 +398,22 @@ def do_train(args):
                         tokenizer.save_pretrained(output_dir)
 
             if global_step >= num_training_steps:
-                print(
-                    "best_step: %d, loss: %.6f, precision: %.4f, recall: %.4f, best_f1: %.4f"
-                    % (best_step, best_f1_loss, best_f1_precision, best_f1_recall, best_f1)
-                )
-                return
+                break
+                # end_time = time.time()
+                # print(
+                #     "best_step: %d, loss: %.6f, precision: %.4f, recall: %.4f, best_f1: %.4f"
+                #     % (best_step, best_f1_loss, best_f1_precision, best_f1_recall, best_f1)
+                # )
+                # print(f"finish job '{task_name}', time: {end_time-start_time}")
+                # return
 
     # 设置的 max_step 过大（大于 num_train_epochs * train_steps_per_epoch）
+    end_time = time.time()
     print(
         "best_step: %d, loss: %.6f, precision: %.4f, recall: %.4f, best_f1: %.4f"
         % (best_step, best_f1_loss, best_f1_precision, best_f1_recall, best_f1)
     )
+    print(f"finish job '{task_name}', time: {end_time - start_time}")
 
     # endregion
 
