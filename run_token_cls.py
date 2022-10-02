@@ -399,23 +399,16 @@ def do_train(args):
 
             if global_step >= num_training_steps:
                 break
-                # end_time = time.time()
-                # print(
-                #     "best_step: %d, loss: %.6f, precision: %.4f, recall: %.4f, best_f1: %.4f"
-                #     % (best_step, best_f1_loss, best_f1_precision, best_f1_recall, best_f1)
-                # )
-                # print(f"finish job '{task_name}', time: {end_time-start_time}")
-                # return
 
-    # 设置的 max_step 过大（大于 num_train_epochs * train_steps_per_epoch）
+    # endregion
+
+    # print best validation result and running time
     end_time = time.time()
     print(
         "best_step: %d, loss: %.6f, precision: %.4f, recall: %.4f, best_f1: %.4f"
         % (best_step, best_f1_loss, best_f1_precision, best_f1_recall, best_f1)
     )
     print(f"finish job '{task_name}', time: {end_time - start_time}")
-
-    # endregion
 
 
 if __name__ == "__main__":
