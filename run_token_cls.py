@@ -171,6 +171,16 @@ def parse_args():
     return args
 
 
+def _read_token_cls_data(data_path):
+    with open(data_path, "r") as fin:
+        for line in fin:
+            line = line.rstrip()
+            tokens_str, labels_str = line.split("\t")
+            tokens = tokens_str.split("\002")
+            labels = labels_str.split("\002")
+            yield {"tokens": tokens, "labels": labels}
+
+
 def tokenize_and_align_labels_v1(examples, tokenizer, label_map, max_seq_length=128):
     no_entity_id = label_map["O"]
     examples_encoded = tokenizer(
@@ -271,15 +281,6 @@ def do_train(args):
         os.makedirs(output_dir)
 
     # region Load training and validation set
-
-    def _read_token_cls_data(data_path):
-        with open(data_path, "r") as fin:
-            for line in fin:
-                line = line.rstrip()
-                tokens_str, labels_str = line.split("\t")
-                tokens = tokens_str.split("\002")
-                labels = labels_str.split("\002")
-                yield {"tokens": tokens, "labels": labels}
 
     train_dataset = load_dataset(_read_token_cls_data, data_path=train_file_path, lazy=False)
     eval_dataset = load_dataset(_read_token_cls_data, data_path=eval_file_path, lazy=False)
@@ -411,8 +412,80 @@ def do_train(args):
     print(f"finish job '{task_name}', time: {end_time - start_time}")
 
 
+def do_eval(args):
+    start_time = time.time()
+    task_name = args.task_name
+
+    print(f"start execute task '{task_name}'...")
+
+    paddle.set_device(args.device)
+
+    eval_file_path = args.eval_file_path
+    label_map_file_path = args.label_map_file_path
+    if not os.path.exists(eval_file_path) or not os.path.isfile(eval_file_path):
+        sys.exit(f"{label_map_file_path} dose not exists or is not a file.")
+
+    output_dir = args.output_dir
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    eval_dataset = load_dataset(_read_token_cls_data, data_path=eval_file_path, lazy=False)
+
+    with open(label_map_file_path, "r") as fin:
+        label_map = json.load(fin)
+    num_classes = len(label_map)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+
+    transform_func = functools.partial(
+        tokenize_and_align_labels_v2,
+        tokenizer=tokenizer,
+        label_map=label_map,
+        max_seq_length=args.max_seq_length
+    )
+    eval_dataset = eval_dataset.map(transform_func)
+
+    collate_fn = DataCollatorForTokenClassification(tokenizer=tokenizer)
+
+    eval_batch_sampler = paddle.io.BatchSampler(
+        eval_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False
+    )
+    eval_data_loader = DataLoader(
+        dataset=eval_dataset,
+        batch_sampler=eval_batch_sampler,
+        collate_fn=collate_fn,
+        return_list=True
+    )
+
+    model = AutoModelForTokenClassification.from_pretrained(
+        args.model_name_or_path, num_classes=num_classes
+    )
+    if args.init_checkpoint_path:
+        model_dict = paddle.load(args.init_checkpoint_path)
+        model.set_dict(model_dict)
+
+    loss_obj = paddle.nn.loss.CrossEntropyLoss()
+    metric_obj = ChunkEvaluator(label_list=list(label_map.keys()))
+
+    eval_loss, eval_precision, eval_recall, eval_f1_score = evaluate(
+        eval_data_loader, model, loss_obj, metric_obj
+    )
+
+    end_time = time.time()
+    print(f"finish job '{task_name}', time: {end_time - start_time}")
+
+
+def do_predict(args):
+    pass
+
+
+
 if __name__ == "__main__":
     args = parse_args()
     print_arguments(args)
     if args.do_train:
         do_train(args)
+    elif args.do_eval:
+        do_eval(args)
+    elif args.do_predict:
+        do_predict(args)
