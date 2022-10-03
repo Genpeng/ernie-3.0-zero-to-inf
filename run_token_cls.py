@@ -79,6 +79,12 @@ def parse_args():
         type=str,
         required=True
     )
+    parser.add_argument(
+        "--init_checkpoint_path",
+        default=None,
+        type=str,
+        help="The file path of model checkpoint."
+    )
     # endregion
 
     # region Paddle Training Arguments
@@ -416,7 +422,7 @@ def do_eval(args):
     start_time = time.time()
     task_name = args.task_name
 
-    print(f"start execute task '{task_name}'...")
+    print(f"start validation of task '{task_name}'...")
 
     paddle.set_device(args.device)
 
@@ -425,17 +431,16 @@ def do_eval(args):
     if not os.path.exists(eval_file_path) or not os.path.isfile(eval_file_path):
         sys.exit(f"{label_map_file_path} dose not exists or is not a file.")
 
-    output_dir = args.output_dir
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
     eval_dataset = load_dataset(_read_token_cls_data, data_path=eval_file_path, lazy=False)
 
     with open(label_map_file_path, "r") as fin:
         label_map = json.load(fin)
     num_classes = len(label_map)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    if args.init_checkpoint_path:
+        tokenizer = AutoTokenizer.from_pretrained(args.init_checkpoint_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
 
     transform_func = functools.partial(
         tokenize_and_align_labels_v2,
@@ -472,12 +477,11 @@ def do_eval(args):
     )
 
     end_time = time.time()
-    print(f"finish job '{task_name}', time: {end_time - start_time}")
+    print(f"finish validation of '{task_name}', time: {end_time - start_time}")
 
 
 def do_predict(args):
     pass
-
 
 
 if __name__ == "__main__":
@@ -489,3 +493,5 @@ if __name__ == "__main__":
         do_eval(args)
     elif args.do_predict:
         do_predict(args)
+    else:
+        sys.exit("the values of status flag `do_train`, `do_eval` and `do_predict` are both `False`")
