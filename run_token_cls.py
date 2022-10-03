@@ -266,7 +266,7 @@ def do_train(args):
     start_time = time.time()
     task_name = args.task_name
 
-    print(f"start execute task '{task_name}'...")
+    print(f"start training of task '{task_name}'...")
 
     paddle.set_device(args.device)
     if paddle.distributed.get_world_size() > 1:
@@ -415,7 +415,7 @@ def do_train(args):
         "best_step: %d, loss: %.6f, precision: %.4f, recall: %.4f, best_f1: %.4f"
         % (best_step, best_f1_loss, best_f1_precision, best_f1_recall, best_f1)
     )
-    print(f"finish job '{task_name}', time: {end_time - start_time}")
+    print(f"finish training of task '{task_name}', time: {end_time - start_time}")
 
 
 def do_eval(args):
@@ -430,6 +430,10 @@ def do_eval(args):
     label_map_file_path = args.label_map_file_path
     if not os.path.exists(eval_file_path) or not os.path.isfile(eval_file_path):
         sys.exit(f"{label_map_file_path} dose not exists or is not a file.")
+    if not os.path.exists(eval_file_path) or not os.path.isfile(eval_file_path):
+        sys.exit(f"{label_map_file_path} dose not exists or is not a file.")
+
+    # region Load Validation Set
 
     eval_dataset = load_dataset(_read_token_cls_data, data_path=eval_file_path, lazy=False)
 
@@ -462,15 +466,28 @@ def do_eval(args):
         return_list=True
     )
 
-    model = AutoModelForTokenClassification.from_pretrained(
-        args.model_name_or_path, num_classes=num_classes
-    )
+    # endregion
+
+    # region Define model, loss, metric for validation
+
+    # model = AutoModelForTokenClassification.from_pretrained(
+    #     args.model_name_or_path, num_classes=num_classes
+    # )
+    # if args.init_checkpoint_path:
+    #     model_dict = paddle.load(args.init_checkpoint_path)
+    #     model.set_dict(model_dict)
+
     if args.init_checkpoint_path:
-        model_dict = paddle.load(args.init_checkpoint_path)
-        model.set_dict(model_dict)
+        model = AutoModelForTokenClassification.from_pretrained(args.init_checkpoint_path)
+    else:
+        model = AutoModelForTokenClassification.from_pretrained(
+            args.model_name_or_path, num_classes=num_classes
+        )
 
     loss_obj = paddle.nn.loss.CrossEntropyLoss()
     metric_obj = ChunkEvaluator(label_list=list(label_map.keys()))
+
+    # end region
 
     eval_loss, eval_precision, eval_recall, eval_f1_score = evaluate(
         eval_data_loader, model, loss_obj, metric_obj
